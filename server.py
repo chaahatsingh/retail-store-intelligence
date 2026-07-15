@@ -16,6 +16,8 @@ import os
 import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
+from analytics.customer_metrics import CustomerMetrics
+from analytics.business_metrics import BusinessMetrics
 
 import uvicorn
 from fastapi import FastAPI, Query, HTTPException, Request
@@ -23,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from analytics.metrics import MetricsEngine
 
 from config import OUTPUT_DIR, BASE_DIR
 
@@ -200,6 +203,8 @@ def _load_events() -> list:
         return []
     with open(path, "r") as f:
         return [json.loads(line) for line in f if line.strip()]
+    
+    from analytics.metrics import MetricsEngine
 
 
 def _require(data, name: str):
@@ -358,43 +363,26 @@ def event_schema():
 # Store Overview
 # ─────────────────────────────────────────────────────────────────
 
-@app.get("/api/v1/store/all/overview", response_model=AllStoresOverview, tags=["Overview"])
-def all_stores_overview():
-    """Combined KPI summary across all stores."""
-    return _all_stores_overview_payload()
-
-
-@app.get("/api/v1/stores/overview", response_model=AllStoresOverview, tags=["Overview"])
-def stores_overview():
-    """Alias for combined KPI summary."""
-    return _all_stores_overview_payload()
-
-
 @app.get("/api/v1/store/{store_id}/overview", response_model=StoreOverview, tags=["Overview"])
 def store_overview(store_id: str):
-    """Per-store KPI summary: visitors, revenue, orders, cameras."""
+    """Per-store KPI summary powered by the analytics engine."""
+
     analytics = _require(_load("store_analytics.json"), "store_analytics.json")
     sales = _load("sales_analytics.json") or {}
     events = _load_events()
 
-    entry_ids = {
-        e["id_token"]
-        for e in events
-        if e.get("event_type") == "entry"
-        and _store_matches(e, store_id)
-    }
+    customer = CustomerMetrics(events, store_id)
+    business = BusinessMetrics(events, sales, store_id)
 
     cameras_active = len(analytics.get(store_id, {}))
 
     return {
         "store_id": store_id,
-        "total_unique_visitors": len(entry_ids),
+        "total_unique_visitors": customer.total_visitors(),
         "total_revenue": sales.get("total_revenue", 0),
         "total_orders": sales.get("total_orders", 0),
         "cameras_active": cameras_active,
     }
-
-
 # ─────────────────────────────────────────────────────────────────
 # Footfall
 # ─────────────────────────────────────────────────────────────────
@@ -674,3 +662,18 @@ if __name__ == "__main__":
 +------------------------------------------------------+
 """)
     uvicorn.run("server:app", host=args.host, port=args.port, reload=True)
+    
+@app.get("/api/v1/analytics/business-summary", tags=["Analytics"])
+def business_summary():
+
+    events = _load_events()
+
+    metrics = MetricsEngine(events)
+
+    return {
+        "total_visitors": metrics.total_visitors(),
+        "queue_abandonment_rate": metrics.queue_abandonment_rate(),
+        "average_queue_wait_seconds": metrics.average_queue_wait(),
+        "most_popular_zones": metrics.zone_popularity(),
+        "peak_hour": metrics.peak_hour()
+    }
